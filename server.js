@@ -20,7 +20,7 @@ const desktopAppUpdateManifestPath = path.join(desktopAppUpdateDir, "latest.json
 const corsOrigin = process.env.CORS_ORIGIN || "*";
 const retentionDays = Math.max(1, Number(process.env.CCTV_RETENTION_DAYS || 30));
 const retentionMs = retentionDays * 24 * 60 * 60 * 1000;
-const firebaseStorageBucket = process.env.FIREBASE_STORAGE_BUCKET || "dongtantest4.firebasestorage.app";
+const firebaseStorageBucket = process.env.FIREBASE_STORAGE_BUCKET || "ujproject-7a3e4.firebasestorage.app";
 const firebaseSignedUrlMinutes = Math.max(1, Number(process.env.FIREBASE_SIGNED_URL_MINUTES || 30));
 let firebaseBucketPromise = null;
 
@@ -105,6 +105,23 @@ function isDirectBrowserVideo(item) {
 
 function isFirebaseStorageItem(item) {
   return Boolean(item?.storageProvider === "firebase" && item?.storagePath);
+}
+
+function normalizeBranchKey(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function videoDatabaseBranchOf(item) {
+  return normalizeBranchKey(item?.databaseBranch || item?.branch || "");
+}
+
+function sortVideosForStoragePriority(items, storageFirst) {
+  if (!storageFirst) return items;
+  return [...items].sort((a, b) => {
+    const storageDelta = Number(isFirebaseStorageItem(b)) - Number(isFirebaseStorageItem(a));
+    if (storageDelta) return storageDelta;
+    return new Date(b.uploadedAt || 0).getTime() - new Date(a.uploadedAt || 0).getTime();
+  });
 }
 
 function hasFirebaseServiceAccountConfig() {
@@ -382,6 +399,7 @@ app.post("/api/videos/upload", upload.single("video"), async (req, res, next) =>
       mimeType: getMimeType(storedName),
       size: stat.size,
       uploadedAt: new Date().toISOString(),
+      databaseBranch: normalizeBranchKey(req.body.databaseBranch),
     };
     const items = await readIndex();
     items.unshift(item);
@@ -463,6 +481,7 @@ app.post("/api/videos/firebase-complete", async (req, res, next) => {
       storageProvider: "firebase",
       storageBucket: firebaseStorageBucket,
       storagePath,
+      databaseBranch: normalizeBranchKey(req.body.databaseBranch),
     };
 
     const items = await readIndex();
@@ -479,11 +498,19 @@ app.get("/api/videos", async (req, res, next) => {
   try {
     await cleanupExpiredVideos();
     const query = compact(req.query.invoice || req.query.q || "");
+    const databaseBranch = normalizeBranchKey(req.query.databaseBranch);
+    const storageFirst = req.query.storageFirst === "1" || req.query.storageFirst === "true";
     const items = await readIndex();
-    const filtered = query
-      ? items.filter((item) => compact(item.invoiceNumber).includes(query) || compact(item.fileName).includes(query))
+    const branchFiltered = databaseBranch
+      ? items.filter((item) => {
+          const itemBranch = videoDatabaseBranchOf(item);
+          return !itemBranch || itemBranch === databaseBranch;
+        })
       : items.slice(0, 100);
-    res.json({ items: filtered.slice(0, 100) });
+    const filtered = query
+      ? branchFiltered.filter((item) => compact(item.invoiceNumber).includes(query) || compact(item.fileName).includes(query))
+      : branchFiltered;
+    res.json({ items: sortVideosForStoragePriority(filtered, storageFirst).slice(0, 100) });
   } catch (error) {
     next(error);
   }
