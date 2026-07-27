@@ -208,6 +208,34 @@ async function getFirebaseReadUrl(item, disposition = "inline") {
   return url;
 }
 
+async function streamFirebaseVideo(item, req, res) {
+  const bucket = await getFirebaseBucket();
+  const file = bucket.file(item.storagePath);
+  const [metadata] = await file.getMetadata();
+  const size = Number(metadata.size || item.size || 0);
+  const contentType = metadata.contentType || item.mimeType || getMimeType(item.fileName || item.originalName || "video.mp4");
+  const range = req.headers.range;
+
+  res.setHeader("Accept-Ranges", "bytes");
+  res.setHeader("Content-Type", contentType);
+  res.setHeader("Cache-Control", "private, max-age=300");
+
+  if (range && size > 0) {
+    const match = range.match(/bytes=(\d+)-(\d*)/);
+    if (!match) return res.status(416).end();
+    const start = Number(match[1]);
+    const end = match[2] ? Number(match[2]) : size - 1;
+    if (start >= size || end >= size || start > end) return res.status(416).end();
+    res.status(206);
+    res.setHeader("Content-Range", `bytes ${start}-${end}/${size}`);
+    res.setHeader("Content-Length", end - start + 1);
+    return file.createReadStream({ start, end }).pipe(res);
+  }
+
+  if (size > 0) res.setHeader("Content-Length", size);
+  return file.createReadStream().pipe(res);
+}
+
 function isExpiredUploadedAt(value, now = Date.now()) {
   const time = new Date(value || 0).getTime();
   return Number.isFinite(time) && time > 0 && now - time > retentionMs;
@@ -534,7 +562,7 @@ app.get("/api/videos/:id/stream", async (req, res, next) => {
     const found = await findVideo(req.params.id);
     if (!found) return res.status(404).json({ error: "video not found" });
     if (found.firebase) {
-      return res.redirect(await getFirebaseReadUrl(found.item, "inline"));
+      return streamFirebaseVideo(found.item, req, res);
     }
     const { item, absolutePath } = found;
 
